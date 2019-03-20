@@ -179,7 +179,9 @@ A simple improvement to the baseline DX-conditional imputation technique impleme
 Another simple improvement is to use the DX-conditional imputation as a regularizer for the last observation.
 
 Most performance gains are expected by 
+  - Computing age at exam date rather than age at baseline, and adding this as a time-varying covariate
   - Adding imaging and other covariates 
+  - Using different predictors for each of the three prediction targets
   - Including subject clustering (e.g. by random effects modelling)
   - Trajectory modelling (true time series rather than clustered points)
 
@@ -189,10 +191,13 @@ source('prediction_models_jonas.R')
 doParallel::registerDoParallel(6)
 
 ########## Train on full LB1+LB2
+# We could also remove last full observation for each subject in LB2 < 2010-04 to avoid overfitting
 my_formula<-as.formula(paste('Ventricles_ICV',paste(setdiff(vars_all, 'Ventricles_ICV'), collapse=' + '), sep='~'))
 mod.NVV<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
 my_formula<-as.formula(paste('ADAS13',paste(setdiff(vars_all, 'ADAS13'), collapse=' + '), sep='~'))
 mod.ADAS13<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
+my_formula<-as.formula(paste('DXnow',paste(setdiff(vars_all, 'DXnow'), collapse=' + '), sep='~'))
+mod.DXnow<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
 
 
 ########## Predict on LB2
@@ -235,22 +240,29 @@ df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=funct
   if (dim(df_tmp_cc)[1] > 0) {
     pred_NVV<-predict(mod.NVV, tail(df_tmp_cc,1))
     pred_ADAS13<-predict(mod.ADAS13, tail(df_tmp_cc,1))
+    pred_DXnow<-predict(mod.DXnow, tail(df_tmp_cc,1), type="prob")
+    pred_DXnow.CNRelativeProbability<-pred_DXnow[,'NL']
+    pred_DXnow.MCIRelativeProbability<-pred_DXnow[,'MCI']
+    pred_DXnow.ADRelativeProbability<-pred_DXnow[,'Dementia']
     # TODO also compute intervals around predictions rather than imputing
   } else {
     pred_NVV<-df_impute[imp_rowidx_use,]$imp.Ventricles_ICV
     pred_ADAS13<-df_impute[imp_rowidx_use,]$imp.ADAS13
+    pred_DXnow.CNRelativeProbability<df_impute[imp_rowidx_use,]$imp.CNRelativeProbability
+    pred_DXnow.MCIRelativeProbability<-df_impute[imp_rowidx_use,]$imp.MCIRelativeProbability
+    pred_DXnow.ADRelativeProbability<-df_impute[imp_rowidx_use,]$imp.ADRelativeProbability
   }
   
   # add predictions here - replace by your own outputs for those you want to predict
-  df_res$CNRelativeProbability=df_impute[imp_rowidx_use,]$imp.CNRelativeProbability
-  df_res$MCIRelativeProbability=df_impute[imp_rowidx_use,]$imp.MCIRelativeProbability
-  df_res$ADRelativeProbability=df_impute[imp_rowidx_use,]$imp.ADRelativeProbability
-  df_res$ADAS13=pred_ADAS13
-  df_res$ADAS1350_CILower=df_impute[imp_rowidx_use,]$imp.ADAS1350_CILower
-  df_res$ADAS1350_CIUpper=df_impute[imp_rowidx_use,]$imp.ADAS1350_CIUpper
-  df_res$Ventricles_ICV=pred_NVV
-  df_res$Ventricles_ICV50_CILower=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CILower
-  df_res$Ventricles_ICV50_CIUpper=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CIUpper
+  df_res$CNRelativeProbability<-pred_DXnow.CNRelativeProbability
+  df_res$MCIRelativeProbability<-pred_DXnow.MCIRelativeProbability
+  df_res$ADRelativeProbability<-pred_DXnow.ADRelativeProbability
+  df_res$ADAS13<-pred_ADAS13
+  df_res$ADAS1350_CILower<-df_impute[imp_rowidx_use,]$imp.ADAS1350_CILower
+  df_res$ADAS1350_CIUpper<-df_impute[imp_rowidx_use,]$imp.ADAS1350_CIUpper
+  df_res$Ventricles_ICV<-pred_NVV
+  df_res$Ventricles_ICV50_CILower<-df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CILower
+  df_res$Ventricles_ICV50_CIUpper<-df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CIUpper
   
   # return filled dataframe
   return(df_res)
@@ -264,7 +276,7 @@ df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=funct
 ```{r prepare_sub}
 
 # submission name - no spaces, no special chars, no funny business
-name_submission<-'RFNVV_conditionalImputation.pre201004'
+name_submission<-'RFDXnow_RFNVV_RFADAS13_conditionalImputation.pre201004'
 output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
 
 # map from df variables to submission csv variables
