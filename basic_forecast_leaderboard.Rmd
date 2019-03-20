@@ -1,0 +1,242 @@
+---
+title: "Basic example TADPOLE forecasting for leaderboard"
+author: "Jonas Richiardi"
+date: "3/17/2019"
+output: html_document
+---
+
+# INTRO
+
+This is a basic R forecasting script for the TADPOLE leaderboard data, initially used during the BrainHack Open Geneva <http://brainhack.ch> for the Dementia forecasting machine learning project.
+
+It is freely inspired by `TADPOLE_SimpleForecastExampleLeaderboard.py` by Neil Oxtoby, itself derived from the matlab version by Daniel C. Alexander, Neil P. Oxtoby, and Razvan Valentin-Marinescu, available at the official TADPOLE challenge git repo <https://github.com/noxtoby/TADPOLE>.
+
+Usage of the ADNI data present in the TADPOLE challenge, and processed here, is governed by the ADNI data usage and citation policy.
+
+# PACKAGE LOADING AND DATA PREP
+
+```{r setup_datprep, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# General programming constructs
+library(plyr)
+library(tidyverse)
+library(glue)
+
+# ML libraries
+library(caret)
+
+# General computation
+library(doParallel)
+
+# Viz
+library(visdat)
+library(directlabels)
+
+# where the TADPOLE challlenge csv files are (D1_D2, LB1_LB2 and friends)
+data_path<-'../../data'
+results_path<-'../../results'
+
+data_path.D1D2 = file.path(data_path, 'TADPOLE_D1_D2.csv')
+data_path.LB1LB2 = file.path(data_path, 'TADPOLE_LB1_LB2.csv')
+
+# read in files 
+# this throws some parsing errors in particular with variables 
+# AVEMTEMP_BAIPETNMRC_09_12_16
+# TAU_UPENNBIOMK9_04_19_17 (Tau levels in pg/ml, which is sometimes coded here as above or below certain values as in "<80" rather than a double)
+# PTAU_UPENNBIOMK9_04_19_17 (ditto with phospho-tau)
+# but let's ignore for now
+df<-readr::read_csv(data_path.D1D2)
+
+# do some cleanup and compute useful derived quantities
+# TODO: convert viscode to ordered factor
+df<-dplyr::mutate(df,
+                  DXnow=unlist(plyr::llply(stringr::str_split(DX,' ',simplify=FALSE), .fun=function(this_dx){tail(this_dx,1)})),   # DXnow is only current diagnosis
+                  DX=factor(DX),                                   # DX can also encode conversions 
+                  Ventricles_ICV=Ventricles/ICV_bl,                # Note - using baseline ICV due to less missingness
+                  Exam_months_since_2K=lubridate::time_length(EXAMDATE-lubridate::ymd("2000,01,01"), "months")) 
+
+# get train/test splits (LB1/LB2)
+df_lb<-readr::read_csv(data_path.LB1LB2)
+
+df<-merge(df, df_lb[,c('RID','VISCODE','EXAMDATE','LB1','LB2')], by=c('RID','VISCODE','EXAMDATE'),sort=FALSE) %>% 
+  dplyr::select(RID, PTID, SITE, VISCODE, EXAMDATE, LB1, LB2, DXnow, ADAS13, Ventricles_ICV, dplyr::everything())
+
+N_tr=length(unique(dplyr::filter(df,LB1==1)$RID))
+N_te=length(unique(dplyr::filter(df,LB2==1)$RID))
+
+print(glue::glue('Got {N_tr} training subjects and {N_te} testing subjects for leaderboard predictions'))
+print(table(df$DXnow, useNA='ifany'))
+
+# XXX RESUME PREP LINE 140 simpleForecastExampleLeaderboard.py
+
+# check out a random subject
+(dplyr::filter(df,RID %in% sample_n(df,1)$RID)[,c('RID','EXAMDATE','DXnow','ADAS13','Ventricles_ICV')])
+
+# Explore missingness for a subset of 10 random subjects
+df_rnd<-dplyr::filter(df, RID %in% sample(unique(df$RID),10))[,c('RID','EXAMDATE','DXnow','ADAS13','Ventricles_ICV')]
+visdat::vis_miss(df_rnd)
+
+# "There is no excuse for not looking at data" - show ADAS and DX trajectories for same subjects
+my_plot_settings<-list(geom_line(aes(group=RID, colour=DXnow), size=2),
+                       geom_point(),
+                       theme_bw(),
+                       geom_dl(aes(label = RID), method = "first.points"))
+p1<-ggplot(df_rnd, aes(EXAMDATE, ADAS13))+my_plot_settings
+p2<-ggplot(df_rnd, aes(EXAMDATE, Ventricles_ICV))+my_plot_settings
+gridExtra::grid.arrange(p1,p2,nrow=2)
+
+```
+
+
+# FORECASTS
+
+Here we must provide monthly forecasts for seven years (84 months), starting on 20100501, ending on 20170401.
+
+To do so, we can use any subject data prior to 
+
+The quantities to predict are 
+	- clinical status (NL/MCI/AD)
+		- NL, MCI, AD
+		- must provide relative probabilities of each 
+		- evaluated by: multi-class AUC
+	- ADAS-Cog13 score
+		- must provide score + upper/lower 50% CI 
+		- evaluated by MAE 
+	- Normalized Ventricle Volume (Ventricles / ICV)
+		- must provide NVV + upper/lower 50% CI 
+		- evaluated by MAE
+		
+Some algorithms to explore for forecasts
+  - Beta regression
+
+## Vars prep
+
+```{r model_prep}
+
+target_vars<-list('DXnow','ADAS13','Ventricles_ICV')
+
+# compute class-conditional imputation values for cases with missing data
+# Note! Using these for LB1 crossval is not correct since this looks is trained on the whole LB1
+# IDEA can easily improve this by mabye looking at mode of distribution or fitting a beta (for Ventricles_ICV or ADA)
+df_impute <- dplyr::filter(df, LB1==1) %>%
+  dplyr::group_by(DXnow) %>%
+  dplyr::summarise(imp.Ventricles_ICV=median(Ventricles_ICV, na.rm=TRUE),
+                   imp.Ventricles_ICV50_CILower=quantile(Ventricles_ICV,0.25, na.rm=TRUE),
+                   imp.Ventricles_ICV50_CIUpper=quantile(Ventricles_ICV,0.75, na.rm=TRUE),
+                   imp.ADAS13=median(ADAS13, na.rm=TRUE),
+                   imp.ADAS1350_CILower=quantile(ADAS13,0.25, na.rm=TRUE),
+                   imp.ADAS1350_CIUpper=quantile(ADAS13,0.75, na.rm=TRUE),
+                   imp.CNRelativeProbability=0.33,
+                   imp.MCIRelativeProbability=0.33,
+                   imp.ADRelativeProbability=0.34)
+# row 1 = dementia - low chance of reverting to CN
+df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.05, 0.95)
+# row 2 = MCI - slighty more than half convert
+df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.39, 0.6)
+# row 3 = NL - most stay normal
+df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.7, 0.2, 0.1)
+
+
+```
+
+## Eval (CV on LB1)
+
+This has 1627 subjects.
+
+```{r model_eval}
+
+# setup CV
+n_folds<-10
+n_repeats<-30
+
+
+
+```
+
+
+## Test (train LB1->predict LB2->test LB4)
+
+This has 110 subjects.
+
+```{r model_test}
+source('prediction_models_jonas.R')
+
+registerDoParallel(6)
+
+########## Train on full LB1
+
+########## Predict on LB2
+n_months<-84
+
+# empty frame for one subject
+df_res.empty<-data.frame(RID=rep(NaN, n_months),
+                               ForecastMonth=seq(1:n_months),
+                               ForecastDate=strftime(seq(as.Date("2010-05-01"), as.Date("2017-04-01"), by="month"), format="%Y-%m"), # from 2010-05 to 2017-04
+                               CNRelativeProbability=rep(NaN, n_months),
+                               MCIRelativeProbability=rep(NaN, n_months),
+                               ADRelativeProbability=rep(NaN, n_months),
+                               ADAS13=rep(NaN, n_months),
+                               ADAS1350_CILower=rep(NaN, n_months),
+                               ADAS1350_CIUpper=rep(NaN, n_months),
+                               Ventricles_ICV=rep(NaN, n_months),
+                               Ventricles_ICV50_CILower=rep(NaN, n_months),
+                               Ventricles_ICV50_CIUpper=rep(NaN, n_months)
+                               ) 
+
+# do subject-by-subject predictions
+df_all_results<-plyr::ldply(unique(dplyr::filter(df, LB2==1)$RID), .fun=function(this_RID){
+  # copy correctly structured empty dataframe
+  df_res<-df_res.empty
+  # tag subject
+  df_res$RID=this_RID
+  
+  # add predictions here
+  rowidx_NA<-4
+  df_res$CNRelativeProbability=df_impute[rowidx_NA,]$imp.CNRelativeProbability
+  df_res$MCIRelativeProbability=df_impute[rowidx_NA,]$imp.MCIRelativeProbability
+  df_res$ADRelativeProbability=df_impute[rowidx_NA,]$imp.ADRelativeProbability
+  df_res$ADAS13=df_impute[rowidx_NA,]$imp.ADAS13
+  df_res$ADAS1350_CILower=df_impute[rowidx_NA,]$imp.ADAS1350_CILower
+  df_res$ADAS1350_CIUpper=df_impute[rowidx_NA,]$imp.ADAS1350_CIUpper
+  df_res$Ventricles_ICV=df_impute[rowidx_NA,]$imp.Ventricles_ICV
+  df_res$Ventricles_ICV50_CILower=df_impute[rowidx_NA,]$imp.Ventricles_ICV50_CILower
+  df_res$Ventricles_ICV50_CIUpper=df_impute[rowidx_NA,]$imp.Ventricles_ICV50_CIUpper
+  
+  # return filled dataframe
+  return(df_res)
+}, .parallel=FALSE, .progress="text")
+
+```
+
+
+# PREPARE SUBMISSION FILE 
+
+```{r prepare_sub}
+
+# submission name - no spaces, no special chars, no funny business
+name_submission<-'myAlgorithm1'
+output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
+
+# map from df variables to submission csv variables
+map_out_format=c('RID'='RID',
+  'Forecast Month' = 'ForecastMonth',
+  'Forecast Date' = 'ForecastDate',
+  'CN relative probability' = 'CNRelativeProbability',
+  'MCI relative probability' = 'MCIRelativeProbability',
+  'AD relative probability' = 'ADRelativeProbability',
+  'ADAS13'= 'ADAS13',
+  'ADAS13 50% CI lower' = 'ADAS1350_CILower',
+  'ADAS13 50% CI upper' = 'ADAS1350_CIUpper',
+  'Ventricles_ICV'= 'Ventricles_ICV',
+  'Ventricles_ICV 50% CI lower' = 'Ventricles_ICV50_CILower',
+  'Ventricles_ICV 50% CI upper' = 'Ventricles_ICV50_CIUpper')
+
+df_all_results_sub<-df_all_results %>% 
+  dplyr::rename(!!map_out_format)
+
+readr::write_csv(df_all_results_sub, output_file)
+
+
+```
+
