@@ -25,6 +25,7 @@ library(glue)
 
 # ML libraries
 library(caret)
+library(randomForest)
 
 # General computation
 library(doParallel)
@@ -160,7 +161,7 @@ This has 819 subjects in the pre-2010/04 data.
 n_folds<-10
 n_repeats<-30
 
-# XXX Compute metrics: MAE + mAUC
+# Compute metrics: MAE + mAUC
 
 
 
@@ -169,13 +170,18 @@ n_repeats<-30
 
 ## Test (train LB1+LB2->predict LB2->test LB4)
 
-This has 110 subjects.
+There are 110 LB2 subjects.
 
-One way to do this is to get a prediction for the last available observation of a subject in LB2, and forecast this same value for all 84 months.
+One simple way to do this is to get a prediction for the last available observation of a subject in LB2, and forecast this same value for all 84 months.
 
 A simple improvement to the baseline DX-conditional imputation technique implemented here is to use carry-last-observation forward.
 
 Another simple improvement is to use the DX-conditional imputation as a regularizer for the last observation.
+
+Most performance gains are expected by 
+  - Adding imaging and other covariates 
+  - Including subject clustering (e.g. by random effects modelling)
+  - Trajectory modelling (true time series rather than clustered points)
 
 ```{r model_test}
 source('prediction_models_jonas.R')
@@ -184,8 +190,10 @@ doParallel::registerDoParallel(6)
 
 ########## Train on full LB1+LB2
 my_formula<-as.formula(paste('Ventricles_ICV',paste(setdiff(vars_all, 'Ventricles_ICV'), collapse=' + '), sep='~'))
-
 mod.NVV<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
+my_formula<-as.formula(paste('ADAS13',paste(setdiff(vars_all, 'ADAS13'), collapse=' + '), sep='~'))
+mod.ADAS13<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
+
 
 ########## Predict on LB2
 n_months<-84
@@ -207,32 +215,46 @@ df_res.empty<-data.frame(RID=rep(NaN, n_months),
 
 # do subject-by-subject predictions for LB2 subjects
 df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=function(this_RID){
+  print(this_RID)
   # copy correctly structured empty dataframe
   df_res<-df_res.empty
   # tag subject
   df_res$RID=this_RID
   
-  # find last available observation
+  # find last available observation for imputation
   df_tmp<-dplyr::filter(df_tr, RID==this_RID)[,c(vars_all, 'EXAMDATE')] %>%
     arrange(EXAMDATE)
   # FIXME need to handle all-NA case
   last_non_empty<-sapply(df_tmp, function(x) max(which(!is.na(x))))
+  # locate appropriate row of imputation data frame, to get DX-conditional imputation
   imp_rowidx_use<-match(df_tmp[last_non_empty['DXnow'],'DXnow'], df_impute$DXnow)
+  
+  # See if we can get a complete dataframe to use a predictive model
+  # otherwise just impute
+  df_tmp_cc<-dplyr::filter(df_tmp, complete.cases(df_tmp[,vars_all]))
+  if (dim(df_tmp_cc)[1] > 0) {
+    pred_NVV<-predict(mod.NVV, tail(df_tmp_cc,1))
+    pred_ADAS13<-predict(mod.ADAS13, tail(df_tmp_cc,1))
+    # TODO also compute intervals around predictions rather than imputing
+  } else {
+    pred_NVV<-df_impute[imp_rowidx_use,]$imp.Ventricles_ICV
+    pred_ADAS13<-df_impute[imp_rowidx_use,]$imp.ADAS13
+  }
   
   # add predictions here - replace by your own outputs for those you want to predict
   df_res$CNRelativeProbability=df_impute[imp_rowidx_use,]$imp.CNRelativeProbability
   df_res$MCIRelativeProbability=df_impute[imp_rowidx_use,]$imp.MCIRelativeProbability
   df_res$ADRelativeProbability=df_impute[imp_rowidx_use,]$imp.ADRelativeProbability
-  df_res$ADAS13=df_impute[imp_rowidx_use,]$imp.ADAS13
+  df_res$ADAS13=pred_ADAS13
   df_res$ADAS1350_CILower=df_impute[imp_rowidx_use,]$imp.ADAS1350_CILower
   df_res$ADAS1350_CIUpper=df_impute[imp_rowidx_use,]$imp.ADAS1350_CIUpper
-  df_res$Ventricles_ICV=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV
+  df_res$Ventricles_ICV=pred_NVV
   df_res$Ventricles_ICV50_CILower=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CILower
   df_res$Ventricles_ICV50_CIUpper=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CIUpper
   
   # return filled dataframe
   return(df_res)
-}, .parallel=FALSE, .progress="text")
+}, .parallel=TRUE, .progress="text")
 
 ```
 
@@ -242,7 +264,7 @@ df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=funct
 ```{r prepare_sub}
 
 # submission name - no spaces, no special chars, no funny business
-name_submission<-'conditionalImputation.pre201004'
+name_submission<-'RFNVV_conditionalImputation.pre201004'
 output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
 
 # map from df variables to submission csv variables
