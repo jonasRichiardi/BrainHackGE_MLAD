@@ -50,8 +50,10 @@ df<-readr::read_csv(data_path.D1D2)
 
 # do some cleanup and compute useful derived quantities
 # TODO: convert viscode to ordered factor
+# TODO: Add current age (use EXAMDATE) as AGEnow
 df<-dplyr::mutate(df,
                   DXnow=unlist(plyr::llply(stringr::str_split(DX,' ',simplify=FALSE), .fun=function(this_dx){tail(this_dx,1)})),   # DXnow is only current diagnosis
+                  DXnow=factor(DXnow, levels=c('NL','MCI','Dementia')),
                   DX=factor(DX),                                   # DX can also encode conversions 
                   Ventricles_ICV=Ventricles/ICV_bl,                # Note - using baseline ICV due to less missingness
                   Exam_months_since_2K=lubridate::time_length(EXAMDATE-lubridate::ymd("2000,01,01"), "months")) 
@@ -62,19 +64,23 @@ df_lb<-readr::read_csv(data_path.LB1LB2)
 df<-merge(df, df_lb[,c('RID','VISCODE','EXAMDATE','LB1','LB2')], by=c('RID','VISCODE','EXAMDATE'),sort=FALSE) %>% 
   dplyr::select(RID, PTID, SITE, VISCODE, EXAMDATE, LB1, LB2, DXnow, ADAS13, Ventricles_ICV, dplyr::everything())
 
-N_tr=length(unique(dplyr::filter(df,LB1==1)$RID))
-N_te=length(unique(dplyr::filter(df,LB2==1)$RID))
+# for training, keep only data until 2010
+df_tr<-dplyr::filter(df, LB1==1 || LB2==1, EXAMDATE<"2010-04-01")
 
-print(glue::glue('Got {N_tr} training subjects and {N_te} testing subjects for leaderboard predictions'))
-print(table(df$DXnow, useNA='ifany'))
+
+N_tr=length(unique(dplyr::filter(df_tr,LB1==1)$RID))
+N_tr_pred=length(unique(dplyr::filter(df_tr,LB2==1)$RID))
+
+print(glue::glue('Got {N_tr} training subjects and {N_tr_pred} prediction subjects for leaderboard'))
+print(table(df_tr$DXnow, useNA='ifany'))
 
 # XXX RESUME PREP LINE 140 simpleForecastExampleLeaderboard.py
 
 # check out a random subject
-(dplyr::filter(df,RID %in% sample_n(df,1)$RID)[,c('RID','EXAMDATE','DXnow','ADAS13','Ventricles_ICV')])
+print(dplyr::filter(df_tr,RID %in% sample_n(df,1)$RID)[,c('RID','EXAMDATE','AGE','DXnow','ADAS13','Ventricles_ICV')])
 
 # Explore missingness for a subset of 10 random subjects
-df_rnd<-dplyr::filter(df, RID %in% sample(unique(df$RID),10))[,c('RID','EXAMDATE','DXnow','ADAS13','Ventricles_ICV')]
+df_rnd<-dplyr::filter(df_tr, RID %in% sample(unique(df$RID),10))[,c('RID','EXAMDATE','DXnow','ADAS13','Ventricles_ICV')]
 visdat::vis_miss(df_rnd)
 
 # "There is no excuse for not looking at data" - show ADAS and DX trajectories for same subjects
@@ -114,12 +120,14 @@ Some algorithms to explore for forecasts
 
 ```{r model_prep}
 
-target_vars<-list('DXnow','ADAS13','Ventricles_ICV')
+vars_target<-c('DXnow','ADAS13','Ventricles_ICV')
+vars_pred<-c('AGE')
+vars_all<-c(vars_target, vars_pred)
 
 # compute class-conditional imputation values for cases with missing data
 # Note! Using these for LB1 crossval is not correct since this looks is trained on the whole LB1
 # IDEA can easily improve this by mabye looking at mode of distribution or fitting a beta (for Ventricles_ICV or ADA)
-df_impute <- dplyr::filter(df, LB1==1) %>%
+df_impute <- df_tr %>%
   dplyr::group_by(DXnow) %>%
   dplyr::summarise(imp.Ventricles_ICV=median(Ventricles_ICV, na.rm=TRUE),
                    imp.Ventricles_ICV50_CILower=quantile(Ventricles_ICV,0.25, na.rm=TRUE),
@@ -130,41 +138,54 @@ df_impute <- dplyr::filter(df, LB1==1) %>%
                    imp.CNRelativeProbability=0.33,
                    imp.MCIRelativeProbability=0.33,
                    imp.ADRelativeProbability=0.34)
-# row 1 = dementia - low chance of reverting to CN
-df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.05, 0.95)
-# row 2 = MCI - slighty more than half convert
-df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.39, 0.6)
-# row 3 = NL - most stay normal
+# row 1 = NL - most stay normal
 df_impute[1,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.7, 0.2, 0.1)
-
+# row 2 = MCI - slighty more than half convert
+df_impute[2,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.39, 0.6)
+# row 3 = dementia - low chance of reverting to CN
+df_impute[3,c('imp.CNRelativeProbability','imp.MCIRelativeProbability','imp.ADRelativeProbability')]<-c(0.01, 0.05, 0.95)
+# row 4 = N/A - keep flat prior
+imp_rowidx_NA<-4
 
 ```
 
 ## Eval (CV on LB1)
 
-This has 1627 subjects.
+This has 819 subjects in the pre-2010/04 data.
 
 ```{r model_eval}
+
 
 # setup CV
 n_folds<-10
 n_repeats<-30
+
+# XXX Compute metrics: MAE + mAUC
 
 
 
 ```
 
 
-## Test (train LB1->predict LB2->test LB4)
+## Test (train LB1+LB2->predict LB2->test LB4)
 
 This has 110 subjects.
+
+One way to do this is to get a prediction for the last available observation of a subject in LB2, and forecast this same value for all 84 months.
+
+A simple improvement to the baseline DX-conditional imputation technique implemented here is to use carry-last-observation forward.
+
+Another simple improvement is to use the DX-conditional imputation as a regularizer for the last observation.
 
 ```{r model_test}
 source('prediction_models_jonas.R')
 
-registerDoParallel(6)
+doParallel::registerDoParallel(6)
 
-########## Train on full LB1
+########## Train on full LB1+LB2
+my_formula<-as.formula(paste('Ventricles_ICV',paste(setdiff(vars_all, 'Ventricles_ICV'), collapse=' + '), sep='~'))
+
+mod.NVV<-randomForest::randomForest(my_formula, dplyr::filter(df_tr, complete.cases(df_tr[,vars_all])), ntree=501, importance=FALSE)
 
 ########## Predict on LB2
 n_months<-84
@@ -182,26 +203,32 @@ df_res.empty<-data.frame(RID=rep(NaN, n_months),
                                Ventricles_ICV=rep(NaN, n_months),
                                Ventricles_ICV50_CILower=rep(NaN, n_months),
                                Ventricles_ICV50_CIUpper=rep(NaN, n_months)
-                               ) 
+                               )
 
-# do subject-by-subject predictions
-df_all_results<-plyr::ldply(unique(dplyr::filter(df, LB2==1)$RID), .fun=function(this_RID){
+# do subject-by-subject predictions for LB2 subjects
+df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=function(this_RID){
   # copy correctly structured empty dataframe
   df_res<-df_res.empty
   # tag subject
   df_res$RID=this_RID
   
-  # add predictions here
-  rowidx_NA<-4
-  df_res$CNRelativeProbability=df_impute[rowidx_NA,]$imp.CNRelativeProbability
-  df_res$MCIRelativeProbability=df_impute[rowidx_NA,]$imp.MCIRelativeProbability
-  df_res$ADRelativeProbability=df_impute[rowidx_NA,]$imp.ADRelativeProbability
-  df_res$ADAS13=df_impute[rowidx_NA,]$imp.ADAS13
-  df_res$ADAS1350_CILower=df_impute[rowidx_NA,]$imp.ADAS1350_CILower
-  df_res$ADAS1350_CIUpper=df_impute[rowidx_NA,]$imp.ADAS1350_CIUpper
-  df_res$Ventricles_ICV=df_impute[rowidx_NA,]$imp.Ventricles_ICV
-  df_res$Ventricles_ICV50_CILower=df_impute[rowidx_NA,]$imp.Ventricles_ICV50_CILower
-  df_res$Ventricles_ICV50_CIUpper=df_impute[rowidx_NA,]$imp.Ventricles_ICV50_CIUpper
+  # find last available observation
+  df_tmp<-dplyr::filter(df_tr, RID==this_RID)[,c(vars_all, 'EXAMDATE')] %>%
+    arrange(EXAMDATE)
+  # FIXME need to handle all-NA case
+  last_non_empty<-sapply(df_tmp, function(x) max(which(!is.na(x))))
+  imp_rowidx_use<-match(df_tmp[last_non_empty['DXnow'],'DXnow'], df_impute$DXnow)
+  
+  # add predictions here - replace by your own outputs for those you want to predict
+  df_res$CNRelativeProbability=df_impute[imp_rowidx_use,]$imp.CNRelativeProbability
+  df_res$MCIRelativeProbability=df_impute[imp_rowidx_use,]$imp.MCIRelativeProbability
+  df_res$ADRelativeProbability=df_impute[imp_rowidx_use,]$imp.ADRelativeProbability
+  df_res$ADAS13=df_impute[imp_rowidx_use,]$imp.ADAS13
+  df_res$ADAS1350_CILower=df_impute[imp_rowidx_use,]$imp.ADAS1350_CILower
+  df_res$ADAS1350_CIUpper=df_impute[imp_rowidx_use,]$imp.ADAS1350_CIUpper
+  df_res$Ventricles_ICV=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV
+  df_res$Ventricles_ICV50_CILower=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CILower
+  df_res$Ventricles_ICV50_CIUpper=df_impute[imp_rowidx_use,]$imp.Ventricles_ICV50_CIUpper
   
   # return filled dataframe
   return(df_res)
@@ -215,7 +242,7 @@ df_all_results<-plyr::ldply(unique(dplyr::filter(df, LB2==1)$RID), .fun=function
 ```{r prepare_sub}
 
 # submission name - no spaces, no special chars, no funny business
-name_submission<-'myAlgorithm1'
+name_submission<-'conditionalImputation.pre201004'
 output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
 
 # map from df variables to submission csv variables
