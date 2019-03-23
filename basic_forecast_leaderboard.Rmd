@@ -57,7 +57,10 @@ df<-dplyr::mutate(df,
                   DXnow=factor(DXnow, levels=c('NL','MCI','Dementia')),
                   DX=factor(DX),                                   # DX can also encode conversions 
                   Ventricles_ICV=Ventricles/ICV_bl,                # Note - using baseline ICV due to less missingness
-                  Exam_months_since_2K=lubridate::time_length(EXAMDATE-lubridate::ymd("2000,01,01"), "months")) 
+                  PTGENDER=factor(PTGENDER),
+                  Exam_months_since_2K=lubridate::time_length(EXAMDATE-lubridate::ymd("2000,01,01"), "months"), # not really needed, just for compat with python example
+                  AV45_bl=as.numeric(AV45_bl),
+                  PIB_bl=as.numeric(PIB_bl)) 
 
 # get train/test splits (LB1/LB2)
 df_lb<-readr::read_csv(data_path.LB1LB2)
@@ -66,6 +69,7 @@ df<-merge(df, df_lb[,c('RID','VISCODE','EXAMDATE','LB1','LB2')], by=c('RID','VIS
   dplyr::select(RID, PTID, SITE, VISCODE, EXAMDATE, LB1, LB2, DXnow, ADAS13, Ventricles_ICV, dplyr::everything())
 
 # for training, keep only data until 2010
+# NOTE we could actually use everything before that date, not just LB1/LB2
 df_tr<-dplyr::filter(df, LB1==1 || LB2==1, EXAMDATE<"2010-04-01")
 
 
@@ -276,7 +280,7 @@ df_all_results<-plyr::ldply(unique(dplyr::filter(df_tr, LB2==1)$RID), .fun=funct
 ```{r prepare_sub}
 
 # submission name - no spaces, no special chars, no funny business
-name_submission<-'RFDXnow_RFNVV_RFADAS13_conditionalImputation.pre201004'
+name_submission<-'RFDXnow_RFNVV_RFADAS13_PTGENDER_MidTempBl_conditionalImputation.pre201004'
 output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
 
 # map from df variables to submission csv variables

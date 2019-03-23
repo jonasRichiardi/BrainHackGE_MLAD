@@ -1,0 +1,96 @@
+---
+title: "Ensemble TADPOLE leaderboard forecasts for accuracy improvement"
+author: "Jonas Richiardi"
+date: "3/17/2019"
+output: html_document
+---
+
+# INTRO
+
+This is an baseline for combining several TADPOLE Leaderboard forecasts, initially used during the BrainHack Open Geneva <http://brainhack.ch> for the Dementia forecasting machine learning project.
+
+For information on TADPOLE please look at <https://tadpole.grand-challenge.org>
+
+Usage of the ADNI data present in the TADPOLE challenge,is governed by the ADNI data usage and citation policy.
+
+# PACKAGE LOADING AND DATA PREP
+
+```{r setup_datprep, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# General programming constructs
+library(plyr)
+library(tidyverse)
+library(glue)
+
+# General computation
+library(doParallel)
+
+# Viz
+library(visdat)
+library(directlabels)
+
+# where the TADPOLE challenge forecasts csv files are
+results_path<-'../../results'
+
+all_forecast_files<-dir(results_path, pattern="*.csv")
+
+df_fc<-plyr::ldply(all_forecast_files, .fun=function(this_file){
+  df_fc_tmp<-readr::read_csv(file.path(results_path,this_file))
+  return(cbind(data.frame(ForecastFile=this_file), df_fc_tmp))
+})
+
+# quick look
+ggplot(df_fc, aes(`CN relative probability`))+
+  geom_density(aes(colour=ForecastFile))+
+  guides(colour=FALSE)+
+  ggitle('Distribution per forecast file')
+
+# check out one subject
+filter(df_fc, RID==8, `Forecast Date`=="2012-01")
+
+
+
+```
+
+
+# ENSEMBLE FORECASTS
+
+## Averaging
+
+```{r ensemble_forecasts_avg}
+
+df_ens<-dplyr::select(df_fc, -ForecastFile) %>% dplyr::group_by(RID,`Forecast Month`,`Forecast Date`) %>% dplyr::summarise_if(is.numeric, mean, na.rm = TRUE) %>% ungroup()
+
+# check out a subject post-ensembling
+filter(df_ens, RID==8, `Forecast Date`=="2012-01")
+
+
+```
+
+## Median 
+
+```{r ensemble_forecasts_median}
+
+df_ens<-dplyr::select(df_fc, -ForecastFile) %>% dplyr::group_by(RID,`Forecast Month`,`Forecast Date`) %>% dplyr::summarise_if(is.numeric, median, na.rm = TRUE) %>% ungroup()
+
+# check out a subject post-ensembling
+filter(df_ens, RID==8, `Forecast Date`=="2012-01")
+
+
+```
+
+
+# PREPARE SUBMISSION FILE 
+
+```{r prepare_sub}
+
+# submission name - no spaces, no special chars, no funny business
+name_submission<-'Ensemble_median'
+output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
+
+readr::write_csv(df_ens, output_file)
+
+
+```
+
