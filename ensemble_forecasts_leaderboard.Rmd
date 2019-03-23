@@ -44,7 +44,7 @@ df_fc<-plyr::ldply(all_forecast_files, .fun=function(this_file){
 ggplot(df_fc, aes(`CN relative probability`))+
   geom_density(aes(colour=ForecastFile))+
   guides(colour=FALSE)+
-  ggitle('Distribution per forecast file')
+  ggtitle('Distribution per forecast file')
 
 # check out one subject
 filter(df_fc, RID==8, `Forecast Date`=="2012-01")
