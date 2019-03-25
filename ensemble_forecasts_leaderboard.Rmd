@@ -40,6 +40,8 @@ df_fc<-plyr::ldply(all_forecast_files, .fun=function(this_file){
   return(cbind(data.frame(ForecastFile=this_file), df_fc_tmp))
 })
 
+print(glue::glue('Got {length(unique(df_fc$ForecastFile))} forecasts'))
+
 # quick look
 ggplot(df_fc, aes(`CN relative probability`))+
   geom_density(aes(colour=ForecastFile))+
@@ -56,6 +58,8 @@ filter(df_fc, RID==8, `Forecast Date`=="2012-01")
 
 # ENSEMBLE FORECASTS
 
+Easy improvements: renormalize probabilities
+
 ## Averaging
 
 ```{r ensemble_forecasts_avg}
@@ -69,6 +73,7 @@ filter(df_ens, RID==8, `Forecast Date`=="2012-01")
 ```
 
 ## Median 
+
 
 ```{r ensemble_forecasts_median}
 
@@ -86,8 +91,8 @@ filter(df_ens, RID==8, `Forecast Date`=="2012-01")
 ```{r prepare_sub}
 
 # submission name - no spaces, no special chars, no funny business
-name_submission<-'Ensemble_median'
-output_file = file.path(results_path, glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
+name_submission<-'Ensemble2_med'
+output_file = file.path(results_path, 'Ensemble', glue::glue('TADPOLE_Submission_Leaderboard_{name_submission}.csv'))
 
 readr::write_csv(df_ens, output_file)
 
